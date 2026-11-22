@@ -87,6 +87,28 @@ else
   echo "✓ Plugin installed at ${PLUGIN_DEST}"
 fi
 
+# This explicit full-install command retains its historical classification/capture
+# consent, including --skip-guardrails installs. Catalog installs do not run it.
+if ${DRY_RUN}; then
+  echo "[dry-run] record full-install pluginConsent in ${CONFIG_FILE}"
+else
+  CONFIG_JSON="${CONFIG_FILE}" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ['CONFIG_JSON'])
+config = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+if not isinstance(config, dict):
+    raise SystemExit('Revenium config must be an object; refusing consent write')
+config['pluginConsent'] = {'classification_enabled': True, 'collection_enabled': True}
+path.parent.mkdir(parents=True, exist_ok=True)
+temporary = path.with_suffix('.plugin-consent.tmp')
+temporary.write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
+os.replace(temporary, path)
+PY
+fi
+
 # Patch ${HOOKS_CONFIG_FILE} to ensure the plugin appears in plugins.enabled.
 # Mirror of install.sh's heredoc — stdlib only, no PyYAML (per
 # project constraint), idempotent on re-run, lenient about list-item indentation.

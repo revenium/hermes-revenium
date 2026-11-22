@@ -9,6 +9,15 @@ this repository.
 
 ## [Unreleased]
 
+### Catalog and discovery preparation
+
+- Install-first README, explicit data disclosure and free-plan confirmation placeholder.
+- Separate catalog-only install path, compliance audit and community entry draft.
+- Demo recording script, SECURITY.md and draft v0.1.0 catalog-package release notes;
+  the existing v1.x history is preserved and no release is published.
+- Corrected the evaluator response limit in the ROI guide from 256 to 512 tokens,
+  matching the implementation without changing its behavior.
+
 ### Added
 
 - `declare-baseline.sh <job_type>`, an operator-only script for the job-type settings

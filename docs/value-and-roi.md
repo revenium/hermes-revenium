@@ -220,7 +220,7 @@ flowchart TB
         A["session ends / turn completes"] --> B["job inference<br/>root session only"]
         B --> C{"status == SUCCESS<br/>AND enabled is literally true?"}
         C -->|no| N["non-SUCCESS sidecar record<br/>abstention_reason: not_evaluated_non_success<br/>costs + coverage kept, value family absent"]
-        C -->|yes| D["ONE bounded LLM call<br/>256 max tokens, 15s, 6000-char transcript"]
+        C -->|yes| D["ONE bounded LLM call<br/>512 max tokens, 15s, 6000-char transcript"]
         D --> E["_validate_assessment<br/>ordered gates, abstain on any failure"]
         E -->|abstain| F["abstention sidecar record<br/>with its own abstention_reason"]
         E -->|accept| G["derive value, resolve bounds,<br/>net supplied costs"]
@@ -292,7 +292,7 @@ cost and no value remains visible without the skill asserting an unmeasured nega
 
 | Bound | Value | Source constant |
 |---|---|---|
-| Max response tokens | 256 | `_EVAL_MAX_TOKENS` |
+| Max response tokens | 512 | `_EVAL_MAX_TOKENS` |
 | Timeout | 15.0 s | `_EVAL_TIMEOUT_SECONDS` |
 | Transcript slice fed to the model | first 6000 chars | `_EVAL_TRANSCRIPT_LIMIT` |
 | Calls per successful arc | exactly one | — |

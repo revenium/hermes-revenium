@@ -76,6 +76,9 @@ def _register(mod):
     registered = {}
 
     class StubCtx:
+        def get_config(self, key, default=None):
+            return True  # Dedup fixtures exercise opted-in classification.
+
         def register_hook(self, name, cb):
             registered[name] = cb
 

@@ -4,10 +4,10 @@
 
 # Hermes Revenium
 
-Budget enforcement, semantic task-type metering, agentic job tracking and tool-event
-metering for [Hermes Agent](https://hermes-agent.nousresearch.com) on the
-[Revenium](https://www.revenium.ai) platform. It ships as a Hermes skill bundle and runs
-through a plugin, three shell hooks and a cron job.
+**Langfuse traces your agent. Revenium governs it**: cost, value and ROI per job, with budget guardrails.
+
+For [Hermes Agent](https://hermes-agent.nousresearch.com) on
+[Revenium](https://www.revenium.ai). Value estimates are opt-in, not verified savings.
 
 ![Revenium Labs](https://img.shields.io/badge/Revenium-Labs-6f42c1?style=for-the-badge)
 ![Status: Beta](https://img.shields.io/badge/status-beta%20(best--effort)-f0a020?style=for-the-badge)
@@ -24,6 +24,58 @@ through a plugin, three shell hooks and a cron job.
 [Discord](https://discord.gg/J2DbmjZ2nA)
 
 </div>
+
+## Quick start
+
+### Optional full integration (standalone, not the catalog build)
+
+With Hermes, the Revenium CLI, `git`, `sqlite3`, `python3` and your Revenium API key,
+Team ID, Tenant ID and User ID ready, allow about five minutes for setup; approvals
+and first metering can take longer. Review [What it sends where](#what-it-sends-where)
+before running the bootstrap.
+
+```bash
+hermes skills install revenium/hermes-revenium/skills/revenium
+bash "${HERMES_HOME:-$HOME/.hermes}/skills/revenium/references/bootstrap.sh"
+```
+
+The bootstrap fetches code from `main`, configures credentials, copies the classifier,
+registers shell hooks, creates budget rules, installs a per-minute cron and offers a
+restart. **It is not a pinned catalog install.** Use an isolated test profile first;
+this is an explicit opt-in to the full integration and its background reporting.
+
+Start a Hermes session, approve the hooks when prompted, run one small tool-using job,
+and allow one cron tick (normally up to 60 seconds) after classification. Then verify:
+
+```bash
+bash "${HERMES_HOME:-$HOME/.hermes}/skills/revenium/scripts/plugin-status.sh"
+bash "${HERMES_HOME:-$HOME/.hermes}/skills/revenium/scripts/hooks-status.sh"
+python3 -c 'import json,os,pathlib; p=pathlib.Path(os.environ.get("HERMES_HOME",str(pathlib.Path.home()/".hermes")))/"state/revenium/guardrail-status.json"; d=json.loads(p.read_text()); assert d.get("lastChecked") and d.get("rules"), "No populated guardrail snapshot yet"; print("Guardrail snapshot:",d["lastChecked"],"halted:",d.get("halted"))'
+```
+
+Expect healthy classifier, registered **and firing** hooks, and a populated guardrail
+snapshot. These checks verify local wiring, not receipt by Revenium: confirm the job's
+cost and outcome in your Revenium account. Value/ROI requires the separate
+[value configuration](docs/value-overview.md); it is not enabled by install alone.
+
+For a pinned, plugin-only install with no bootstrap, cron or shell-hook writes, use the
+[**catalog-safe path**](docs/catalog-install.md). Its capabilities and limitations are
+listed there: opt-in classification and local API-usage capture only, **not Revenium
+reporting or budget enforcement**. It reuses the actual classifier without the bootstrap.
+
+> **Multiple profiles?** Set `HERMES_HOME` to the intended home; the full bootstrap
+> also accepts `--profile <name>` (repeatable) or `--all-profiles`. Follow
+> [fleet installation](docs/fleet.md). Never assume one profile's setup covers another.
+> Full prerequisites and alternative paths: [installation guide](docs/installation.md).
+
+**Demo GIF placeholder:** `docs/demo.gif` — not recorded yet.
+[Shot list and recording checklist](docs/demo-script.md): run a job → inspect cost,
+outcome and ROI → show a budget guardrail stopping further work.
+<!-- Replace this placeholder after recording: ![Job cost, outcome, ROI and budget halt](docs/demo.gif) -->
+
+**Pricing:** TODO(John): confirm which metering, jobs/outcomes, ROI and guardrail features
+are included in Revenium's free plan and which require a paid plan. MIT covers this
+repository's code, not hosted-service entitlements.
 
 > ### 🧪 This is a Revenium Labs project
 > **Revenium Labs** projects are field-developed, best-effort, beta-quality software shared
@@ -72,29 +124,30 @@ sqlite3 --version
 python3 --version
 ```
 
-## Quick start
+## What it sends where
 
-```bash
-hermes skills install revenium/hermes-revenium/skills/revenium
-bash ~/.hermes/skills/revenium/references/bootstrap.sh
-```
+This describes the **optional full integration**; the catalog-only path has its own
+[disclosure](docs/catalog-install.md). The cron invokes the Revenium CLI against your
+configured Revenium API destination using the CLI's stored credentials.
 
-The first command installs the skill through Hermes' native path; it scans `SAFE`, so no
-`--force` is needed. The second fetches `scripts/` and `plugins/`, which that path cannot
-carry, then completes setup: credentials, classifier plugin, shell hooks,
-guardrail budget rule, per-minute cron, gateway restart. It is idempotent, so re-running it
-is always safe.
+| Destination | Data |
+|---|---|
+| **Revenium: completions** | Model/provider, input/output/cache/total token counts, timestamps and duration, stop reason and streaming flag; transaction, session/root trace and parent transaction identifiers; task/operation/trace types and names; agent, squad and role, environment/organization, job ID/name/type; configured or resolved subscriber identity (including email/name when enabled), skill and ticket attribution when supported. Auxiliary model usage is metered too. |
+| **Revenium: tools and jobs** | Tool name/ID, timestamp, duration, success and bounded error message, trace/workflow linkage and configured dimensions; job ID/name/type and team, execution result/outcome type, source and bounded failure reason. |
+| **Revenium: value and controls** | When enabled and reportable: value/currency and low/base/high range, supplied costs, attribution, role/hours/rate assumptions, confidence, evidence/mechanism/study, estimator/model/version/locality provenance; outcome timeline metrics and job-type economics where configured. Explicit setup sends budget-rule names, scope, limits and windows; polling reads rule/enforcement state. Operator correction/baseline commands also transmit their declared reasons, provenance and evidence references. |
+| **Local files** | `job-assessments/` retains the append-only assessment/correction history; the sidecar file is not uploaded wholesale, but the selected fields above are reported. Evaluator prose (`basis`, `candidate_downstream_outcome`, `counterfactual_assumption`) stays local. Markers, event spools, taxonomies, ledgers and guardrail snapshots also remain local. Hermes retains its own transcript database. |
+| **Your configured model provider** | Transcript excerpts go to the auxiliary classifier and, when enabled, the value evaluator. This can be a remote provider: “not sent to Revenium” does not mean “never leaves the host.” |
 
-Then start a Hermes session and **approve the hooks** at the prompt Hermes shows the first
-time each one fires. Until you do, they are registered but inert.
+**Raw transcripts and raw model responses are not uploaded to Revenium by these reporters.**
+A blanket “model free-text is never sent” claim would be false: generated job names,
+failed-job reasons and inferred role labels can cross that boundary; tool error strings
+can contain sensitive text too. Do not put secrets in those fields. Length limits are
+not redaction. Evaluator narrative fields listed above are excluded from the wire.
 
-> **Running more than one Hermes profile?** Add `--profile <name>` (repeatable) or
-> `--all-profiles`. Every command here is scoped to **one** Hermes home, and the default
-> home does not include the others. A profile you never name gets no plugin, hooks or
-> cron and meters nothing. See [Multi-profile / fleet installs](docs/fleet.md).
-
-See [docs/installation.md](docs/installation.md) for full instructions, the other three
-install paths and security-scanner output.
+The exact conditional payload contracts are documented in
+[the wire reference](docs/value-and-roi.md#13-the-wire),
+[event metering](docs/event-metering.md), [subscriber attribution](docs/subscriber-attribution.md)
+and the executable [golden fixtures](tests/fixtures/compat/).
 
 ## Architecture
 

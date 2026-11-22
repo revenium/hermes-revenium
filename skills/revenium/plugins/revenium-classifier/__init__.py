@@ -413,7 +413,12 @@ def register(ctx) -> None:
     No try/except — registration failure must surface to the plugin manager
     so operators see the unhealthy-plugin state at gateway-restart time.
     """
-    ctx.register_hook("on_session_end", _on_session_end)
-    ctx.register_hook("on_session_finalize", _on_session_finalize)
-    ctx.register_hook("post_llm_call", _on_post_llm_call)
-    ctx.register_hook("post_api_request", _on_post_api_request)
+    from .catalog_consent import consented
+
+    for name, callback, setting in (
+        ("on_session_end", _on_session_end, "classification_enabled"),
+        ("on_session_finalize", _on_session_finalize, "classification_enabled"),
+        ("post_llm_call", _on_post_llm_call, "classification_enabled"),
+        ("post_api_request", _on_post_api_request, "collection_enabled"),
+    ):
+        ctx.register_hook(name, consented(ctx, callback, setting, _paths_for_session))
