@@ -1,0 +1,25 @@
+# DRAFT ONLY: replace after committing and reviewing the implementation.
+name: revenium-classifier
+repo: https://github.com/revenium/hermes-revenium
+sha: REPLACE_WITH_REVIEWED_40_HEX_COMMIT_SHA
+subdir: skills/revenium/plugins/revenium-classifier
+description: 'Opt-in task/job classification through the configured Hermes model and local API usage capture for Revenium. No Revenium exporter, cron installer or budget enforcement. Fresh installs stay inactive until configured; explicitly bootstrapped full installs retain prior consent. Classification sends transcript content to the configured model provider.'
+maintainer: revenium
+tier: community
+category: general
+requires_hermes: ">=0.23.3"
+version: "1.0.0"
+docs_url: https://github.com/revenium/hermes-revenium/blob/main/docs/catalog-install.md
+platforms: [linux, macos]
+readme: true
+default: false
+onboarding: false
+capabilities:
+  provides_tools: []
+  provides_hooks:
+    - on_session_end
+    - on_session_finalize
+    - post_llm_call
+    - post_api_request
+  provides_middleware: []
+  requires_env: []

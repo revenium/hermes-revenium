@@ -6012,6 +6012,9 @@ exit 0
             registered = {}
 
             class StubCtx:
+                def get_config(self, key, default=None):
+                    return True  # This fixture explicitly opts into processing.
+
                 def register_hook(self, name, cb):
                     registered[name] = cb
 

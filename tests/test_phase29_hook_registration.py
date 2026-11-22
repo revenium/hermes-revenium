@@ -92,6 +92,9 @@ class HookRegistrationTests(unittest.TestCase):
             registered = {}
 
             class StubCtx:
+                def get_config(self, key, default=None):
+                    return True  # Explicit consent in active-processing fixtures.
+
                 def register_hook(self, name, cb):
                     registered[name] = cb
 
@@ -99,14 +102,14 @@ class HookRegistrationTests(unittest.TestCase):
 
             self.assertEqual(len(registered), 4,
                              'register(ctx) must call register_hook exactly four times')
-            self.assertIs(registered['on_session_end'], mod._on_session_end)
-            self.assertIs(registered['on_session_finalize'], mod._on_session_finalize,
-                          'on_session_finalize must be bound to _on_session_finalize, '
+            self.assertIs(registered['on_session_end'].__wrapped__, mod._on_session_end)
+            self.assertIs(registered['on_session_finalize'].__wrapped__, mod._on_session_finalize,
+                          'on_session_finalize must wrap _on_session_finalize, '
                           'not _on_session_end')
-            self.assertIs(registered['post_llm_call'], mod._on_post_llm_call,
-                          'post_llm_call must be bound to _on_post_llm_call')
-            self.assertIs(registered['post_api_request'], mod._on_post_api_request,
-                          'post_api_request must be bound to _on_post_api_request')
+            self.assertIs(registered['post_llm_call'].__wrapped__, mod._on_post_llm_call,
+                          'post_llm_call must wrap _on_post_llm_call')
+            self.assertIs(registered['post_api_request'].__wrapped__, mod._on_post_api_request,
+                          'post_api_request must wrap _on_post_api_request')
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -126,6 +129,9 @@ class HookRegistrationTests(unittest.TestCase):
             registered = {}
 
             class StubCtx:
+                def get_config(self, key, default=None):
+                    return True  # Explicit consent in active-processing fixtures.
+
                 def register_hook(self, name, cb):
                     registered[name] = cb
 

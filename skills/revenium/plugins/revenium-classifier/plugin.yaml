@@ -1,8 +1,20 @@
 name: revenium-classifier
-version: 1.0.0
-description: Universal-coverage Hermes plugin that classifies every run_conversation() session end and writes a GUARDRAIL+CHAT marker pair for Revenium task-type attribution, and spools per-API-call metering events for event-driven completion metering. Covers gateway-served, CLI, interactive, ACP, and cron sessions.
-hooks:
+version: "1.0.0"
+description: Opt-in task/job classification and local API-usage capture for Revenium; no reporter, cron, shell-hook installer or budget enforcement bundled.
+license: MIT
+requires_hermes: ">=0.23.3"
+provides_tools: []
+provides_hooks:
   - on_session_end
   - on_session_finalize
   - post_llm_call
   - post_api_request
+provides_middleware: []
+requires_env: []
+config_schema:
+  classification_enabled:
+    type: bool
+    description: 'Opt in to transcript processing via the configured Hermes auxiliary model and local task/job marker writes. False disables. When unset, only an existing full installation with pluginConsent or configured ruleIds retains prior consent; fresh installs are off.'
+  collection_enabled:
+    type: bool
+    description: 'Opt in to local per-API-call metadata/usage capture (no exporter). False disables. When unset, only an existing full installation with pluginConsent or configured ruleIds retains prior consent; fresh installs are off.'
