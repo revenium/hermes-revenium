@@ -1648,23 +1648,33 @@ warn_if_org_looks_like_agent() {
 # Claude rows on any route ship the stored input. Gemini rows also ship the
 # stored input on purpose: a bare Gemini name can resolve to a price row that
 # already bills the read beside the input, and that pricing question is open.
-#
-# Usage: reported_input_tokens <model> <provider> <input> <cache_read>
-reported_input_tokens() {
-  local model provider input="${3:-0}" cache_read="${4:-0}"
+# The provider alone is enough because an Azure deployment name hides the
+# model. A model name matches only on a family token at its start or right
+# after a `/`, so a local `llama-3-70b-gptq` is not mistaken for GPT.
+input_includes_cache_read() {
+  local model provider
   model="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   provider="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
   case "${model}" in
-    *claude*|*anthropic*|*gemini*) printf '%s\n' "${input}"; return ;;
+    *claude*|*anthropic*|*gemini*) return 1 ;;
   esac
-  if ! [[ "${input}" =~ ^[0-9]+$ && "${cache_read}" =~ ^[0-9]+$ ]]; then
+  case "${provider}" in
+    openai|azure*|xai|groq) return 0 ;;
+  esac
+  case "${model}" in
+    gpt-*|*/gpt-*|chatgpt-*|*/chatgpt-*|o1-*|*/o1-*|o3-*|*/o3-*|o4-*|*/o4-*|grok-*|*/grok-*)
+      return 0 ;;
+  esac
+  return 1
+}
+
+# Usage: reported_input_tokens <model> <provider> <input> <cache_read>
+reported_input_tokens() {
+  local input="$3" cache_read="${4:-0}"
+  if [[ "${input}" =~ ^[0-9]+$ && "${cache_read}" =~ ^[0-9]+$ ]] \
+    && input_includes_cache_read "$1" "$2"; then
+    printf '%s\n' "$(( 10#${input} + 10#${cache_read} ))"
+  else
     printf '%s\n' "${input}"
-    return
   fi
-  case "${provider}|${model}" in
-    openai\|*|azure*\|*|xai\|*|groq\|*|*gpt*|*\|o1-*|*\|o3-*|*\|o4-*|*grok*)
-      printf '%s\n' "$(( 10#${input} + 10#${cache_read} ))" ;;
-    *)
-      printf '%s\n' "${input}" ;;
-  esac
 }

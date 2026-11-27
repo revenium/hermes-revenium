@@ -15,8 +15,12 @@ this repository.
   the cache read, as those providers count it. Hermes stores the input with the read taken
   out, and Revenium takes it out again for these models, so cached calls were under-billed.
   Every send path changes: the main loop, the auxiliary-usage pass and the api-event
-  reporter. Claude rows on any route are unchanged. Gemini rows are also unchanged for now,
-  until Revenium settles how bare Gemini model names are priced.
+  reporter. Any other model served through an Azure, OpenAI, xAI or Groq provider gets the
+  read added too, since an Azure deployment name hides the model. Elsewhere a model name
+  matches only on a GPT, o-series or Grok family token at its start or after a `/`, so a
+  local `llama-3-70b-gptq` is unchanged. An empty input is sent as it was. Claude rows on
+  any route are unchanged. Gemini rows are also unchanged for now, until Revenium settles
+  how bare Gemini model names are priced.
 
 ### Added
 
