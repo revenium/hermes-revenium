@@ -2357,11 +2357,14 @@ PY
       _aux_attr_ticket_memo_sid="${orig_sid}"
     fi
 
+    local aux_model aux_provider
+    aux_model="$(_clean_model_name "${s_model}")"
+    aux_provider="$(_infer_provider "${s_model}" "${s_billing}")"
     local cmd=(
       revenium meter completion
-      --model "$(_clean_model_name "${s_model}")"
-      --provider "$(_infer_provider "${s_model}" "${s_billing}")"
-      --input-tokens "${d_in}"
+      --model "${aux_model}"
+      --provider "${aux_provider}"
+      --input-tokens "$(reported_input_tokens "${aux_model}" "${aux_provider}" "${d_in}" "${d_cr}")"
       --output-tokens "${d_out}"
       --cache-read-tokens "${d_cr}"
       --cache-creation-tokens "${d_cw}"
@@ -5954,7 +5957,7 @@ PY
           revenium meter completion
           --model "${clean_model}"
           --provider "${provider}"
-          --input-tokens "${d_in}"
+          --input-tokens "$(reported_input_tokens "${clean_model}" "${provider}" "${d_in}" "${d_cr}")"
           --output-tokens "${d_out}"
           --cache-read-tokens "${d_cr}"
           --cache-creation-tokens "${d_cw}"
@@ -6310,7 +6313,7 @@ PY
         revenium meter completion
         --model "${clean_model}"
         --provider "${provider}"
-        --input-tokens "${delta_input}"
+        --input-tokens "$(reported_input_tokens "${clean_model}" "${provider}" "${delta_input}" "${delta_cache_read}")"
         --output-tokens "${delta_output}"
         --cache-read-tokens "${delta_cache_read}"
         --cache-creation-tokens "${delta_cache_write}"

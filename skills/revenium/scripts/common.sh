@@ -1640,3 +1640,29 @@ warn_if_org_looks_like_agent() {
   fi
   return 0
 }
+
+# Hermes stores input with the cache read taken out for every provider except
+# Anthropic (hermes-agent normalize_usage). Revenium takes the read out of the
+# input itself on OpenAI-family models (OpenAI, Azure OpenAI, xAI, Groq,
+# Gemini), so those rows ship the provider's own prompt count, which includes
+# the read. Claude rows on any route ship the stored input.
+#
+# Usage: reported_input_tokens <model> <provider> <input> <cache_read>
+reported_input_tokens() {
+  local model provider input="${3:-0}" cache_read="${4:-0}"
+  model="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  provider="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+  case "${model}" in
+    *claude*|*anthropic*) printf '%s\n' "${input}"; return ;;
+  esac
+  if ! [[ "${input}" =~ ^[0-9]+$ && "${cache_read}" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "${input}"
+    return
+  fi
+  case "${provider}|${model}" in
+    openai\|*|azure*\|*|xai\|*|groq\|*|google\|*|gemini\|*|*gpt*|*\|o1-*|*\|o3-*|*\|o4-*|*gemini*|*grok*)
+      printf '%s\n' "$(( input + cache_read ))" ;;
+    *)
+      printf '%s\n' "${input}" ;;
+  esac
+}

@@ -2229,7 +2229,7 @@ PY
         revenium meter completion
         --model "${model_r}"
         --provider "${provider_resolved_r}"
-        --input-tokens "${input_r}"
+        --input-tokens "$(reported_input_tokens "${model_r}" "${provider_resolved_r}" "${input_r}" "${cache_read_r}")"
         --output-tokens "${output_r}"
         --cache-read-tokens "${cache_read_r}"
         --cache-creation-tokens "${cache_write_r}"

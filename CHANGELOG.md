@@ -9,6 +9,14 @@ this repository.
 
 ## [Unreleased]
 
+### Fixed
+
+- Completions on OpenAI, Azure OpenAI, xAI, Groq and Gemini models now send an input that
+  includes the cache read, as those providers count it. Hermes stores the input with the read
+  taken out, and Revenium takes it out again for these models, so cached calls were
+  under-billed. Every send path changes: the main loop, the auxiliary-usage pass and the
+  api-event reporter. Claude rows on any route are unchanged.
+
 ### Added
 
 - `declare-baseline.sh <job_type>`, an operator-only script for the job-type settings
