@@ -835,11 +835,15 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # site) and the zero-marker branch derives the session state (+4):
         # the aux site moves 2359->2382, per-marker 5950->5973, markerless
         # 6310->6337. api-event-report.sh (2248) does not move. Pure shift.
+        # Input with the cache read (2026-11-27): the aux emit names its model
+        # and provider in locals so the input can be derived from them (+3,
+        # above the aux site): 2382->2385, 5973->5976, 6337->6340.
+        # api-event-report.sh (2248) does not move. Pure shift.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 2382),
-            ('hermes-report.sh', 5973),
-            ('hermes-report.sh', 6337),
+            ('hermes-report.sh', 2385),
+            ('hermes-report.sh', 5976),
+            ('hermes-report.sh', 6340),
             ('api-event-report.sh', 2248),
         }
         self.assertEqual(
