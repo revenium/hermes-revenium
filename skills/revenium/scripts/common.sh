@@ -1643,9 +1643,11 @@ warn_if_org_looks_like_agent() {
 
 # Hermes stores input with the cache read taken out for every provider except
 # Anthropic (hermes-agent normalize_usage). Revenium takes the read out of the
-# input itself on OpenAI-family models (OpenAI, Azure OpenAI, xAI, Groq,
-# Gemini), so those rows ship the provider's own prompt count, which includes
-# the read. Claude rows on any route ship the stored input.
+# input itself on OpenAI-family models (OpenAI, Azure OpenAI, xAI, Groq), so
+# those rows ship the provider's own prompt count, which includes the read.
+# Claude rows on any route ship the stored input. Gemini rows also ship the
+# stored input on purpose: a bare Gemini name can resolve to a price row that
+# already bills the read beside the input, and that pricing question is open.
 #
 # Usage: reported_input_tokens <model> <provider> <input> <cache_read>
 reported_input_tokens() {
@@ -1653,15 +1655,15 @@ reported_input_tokens() {
   model="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   provider="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
   case "${model}" in
-    *claude*|*anthropic*) printf '%s\n' "${input}"; return ;;
+    *claude*|*anthropic*|*gemini*) printf '%s\n' "${input}"; return ;;
   esac
   if ! [[ "${input}" =~ ^[0-9]+$ && "${cache_read}" =~ ^[0-9]+$ ]]; then
     printf '%s\n' "${input}"
     return
   fi
   case "${provider}|${model}" in
-    openai\|*|azure*\|*|xai\|*|groq\|*|google\|*|gemini\|*|*gpt*|*\|o1-*|*\|o3-*|*\|o4-*|*gemini*|*grok*)
-      printf '%s\n' "$(( input + cache_read ))" ;;
+    openai\|*|azure*\|*|xai\|*|groq\|*|*gpt*|*\|o1-*|*\|o3-*|*\|o4-*|*grok*)
+      printf '%s\n' "$(( 10#${input} + 10#${cache_read} ))" ;;
     *)
       printf '%s\n' "${input}" ;;
   esac

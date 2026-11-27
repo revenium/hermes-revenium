@@ -3,9 +3,10 @@ own usage object reports.
 
 Hermes stores input with the cache read taken out for every provider except
 Anthropic (hermes-agent `normalize_usage`). Revenium takes the cache read out
-of the input itself on OpenAI-family models (OpenAI, Azure OpenAI, xAI, Groq,
-Gemini), so those rows must ship input + cache read; Anthropic rows ship the
-stored input unchanged. Covers the per-marker and markerless main-loop sends,
+of the input itself on OpenAI-family models (OpenAI, Azure OpenAI, xAI,
+Groq), so those rows must ship input + cache read; Anthropic rows ship the
+stored input unchanged, and so do Gemini rows until Revenium settles how bare
+Gemini names are priced. Covers the per-marker and markerless main-loop sends,
 the auxiliary-usage send and the api-event send.
 """
 import json
@@ -105,8 +106,9 @@ class InputIncludesCacheReadTests(unittest.TestCase):
         build_state_db(self.box.state_db, [
             _session('sid-openai', 'gpt-5.1', 'openai'),
             _session('sid-claude', 'claude-sonnet-4-6', 'anthropic'),
+            _session('sid-gemini', 'gemini-2.5-pro', 'google'),
         ])
-        seed_parent_session_ids(self.box.state_db, {'sid-openai': None, 'sid-claude': None})
+        seed_parent_session_ids(self.box.state_db, {'sid-openai': None, 'sid-claude': None, 'sid-gemini': None})
         build_session_model_usage(self.box.state_db, [{
             'session_id': 'sid-openai', 'model': 'gpt-5-mini', 'billing_provider': 'openai',
             'task': 'approval', 'api_call_count': 1,
@@ -122,6 +124,7 @@ class InputIncludesCacheReadTests(unittest.TestCase):
 
         self.assert_input(sent['gpt-5.1'], INPUT + CACHE_READ)
         self.assert_input(sent['claude-sonnet-4-6'], INPUT)
+        self.assert_input(sent['gemini-2.5-pro'], INPUT)
         self.assert_input(sent['gpt-5-mini'], 300 + CACHE_READ)
 
     def test_per_marker_send(self):
@@ -168,7 +171,7 @@ class InputIncludesCacheReadTests(unittest.TestCase):
         sent = self._by_model(sends)
 
         self.assert_input(sent['gpt-5.1'], INPUT + CACHE_READ)
-        self.assert_input(sent['gemini-2.5-pro'], INPUT + CACHE_READ)
+        self.assert_input(sent['gemini-2.5-pro'], INPUT)
         self.assert_input(sent['claude-sonnet-4-6'], INPUT)
 
 
