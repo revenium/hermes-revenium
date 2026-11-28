@@ -127,6 +127,17 @@ class InputIncludesCacheReadTests(unittest.TestCase):
         self.assert_input(sent['gemini-2.5-pro'], INPUT)
         self.assert_input(sent['gpt-5-mini'], 300 + CACHE_READ)
 
+    def test_provider_guess_decides_gpt_inside_another_word_with_no_provider(self):
+        build_state_db(self.box.state_db, [_session('sid-local', 'llama-3-70b-gptq', '')])
+        seed_parent_session_ids(self.box.state_db, {'sid-local': None})
+
+        rc, output, sends = self.box.run('hermes-report.sh')
+        self.assertEqual(rc, 0, output)
+        send = self._by_model(sends)['llama-3-70b-gptq']
+
+        self.assertEqual(send.get('--provider'), 'openai', send)
+        self.assert_input(send, INPUT + CACHE_READ)
+
     def test_per_marker_send(self):
         build_state_db(self.box.state_db, [_session('sid-openai', 'gpt-5.1', 'openai')])
         seed_parent_session_ids(self.box.state_db, {'sid-openai': None})

@@ -1650,7 +1650,8 @@ warn_if_org_looks_like_agent() {
 # already bills the read beside the input, and that pricing question is open.
 # The provider alone is enough because an Azure deployment name hides the
 # model. A model name matches only on a family token at its start or right
-# after a `/`, so a local `llama-3-70b-gptq` is not mistaken for GPT.
+# after a `/`. Callers that guess the provider as `openai` from a loose name
+# match still get the read added through the provider rule.
 input_includes_cache_read() {
   local model provider
   model="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
