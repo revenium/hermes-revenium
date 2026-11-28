@@ -1640,3 +1640,42 @@ warn_if_org_looks_like_agent() {
   fi
   return 0
 }
+
+# Hermes stores input with the cache read taken out for every provider except
+# Anthropic (hermes-agent normalize_usage). Revenium takes the read out of the
+# input itself on OpenAI-family models (OpenAI, Azure OpenAI, xAI, Groq), so
+# those rows ship the provider's own prompt count, which includes the read.
+# Claude rows on any route ship the stored input. Gemini rows also ship the
+# stored input on purpose: a bare Gemini name can resolve to a price row that
+# already bills the read beside the input, and that pricing question is open.
+# The provider alone is enough because an Azure deployment name hides the
+# model. A model name matches only on a family token at its start or right
+# after a `/`. Callers that guess the provider as `openai` from a loose name
+# match still get the read added through the provider rule.
+input_includes_cache_read() {
+  local model provider
+  model="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  provider="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+  case "${model}" in
+    *claude*|*anthropic*|*gemini*) return 1 ;;
+  esac
+  case "${provider}" in
+    openai|azure*|xai|groq) return 0 ;;
+  esac
+  case "${model}" in
+    gpt-*|*/gpt-*|chatgpt-*|*/chatgpt-*|o1-*|*/o1-*|o3-*|*/o3-*|o4-*|*/o4-*|grok-*|*/grok-*)
+      return 0 ;;
+  esac
+  return 1
+}
+
+# Usage: reported_input_tokens <model> <provider> <input> <cache_read>
+reported_input_tokens() {
+  local input="$3" cache_read="${4:-0}"
+  if [[ "${input}" =~ ^[0-9]+$ && "${cache_read}" =~ ^[0-9]+$ ]] \
+    && input_includes_cache_read "$1" "$2"; then
+    printf '%s\n' "$(( 10#${input} + 10#${cache_read} ))"
+  else
+    printf '%s\n' "${input}"
+  fi
+}
